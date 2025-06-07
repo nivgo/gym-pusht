@@ -25,16 +25,23 @@ if os.environ.get("MUJOCO_GL") != "egl":
 
 
 def pymunk_to_shapely(body, shapes):
+    import shapely.geometry as sg
     geoms = []
     for shape in shapes:
         if isinstance(shape, pymunk.shapes.Poly):
             verts = [body.local_to_world(v) for v in shape.get_vertices()]
             verts += [verts[0]]
             geoms.append(sg.Polygon(verts))
+        elif isinstance(shape, pymunk.shapes.Circle):
+            center = body.local_to_world((0, 0))
+            radius = shape.radius
+            # Approximate as a polygon with enough points
+            geoms.append(sg.Point(center).buffer(radius, resolution=32))
         else:
             raise RuntimeError(f"Unsupported shape type {type(shape)}")
     geom = sg.MultiPolygon(geoms)
     return geom
+
 
 
 class PushTEnv(gym.Env):
@@ -253,12 +260,16 @@ class PushTEnv(gym.Env):
             self.space.step(self.dt)
 
         # Compute reward
+        # obs = self._get_obs() if hasattr(self, '_get_obs') else self.observation 
+        obs = self.get_obs()
+
         coverage = self._get_coverage()
-        reward = np.clip(coverage / self.success_threshold, 0.0, 1.0)
-        terminated = is_success = coverage > self.success_threshold
+        reward = self._get_custom_reward()#np.clip(coverage / self.success_threshold, 0.0, 1.0)
+        terminated = obs[3] >= 512 #is_success = coverage > self.success_threshold
 
         observation = self.get_obs()
         info = self._get_info()
+        is_success = coverage > self.success_threshold
         info["is_success"] = is_success
         info["coverage"] = coverage
 
@@ -304,10 +315,16 @@ class PushTEnv(gym.Env):
         # Draw goal pose
         goal_body = self.get_goal_pose_body(self.goal_pose)
         for shape in self.block.shapes:
-            goal_points = [goal_body.local_to_world(v) for v in shape.get_vertices()]
-            goal_points = [pymunk.pygame_util.to_pygame(point, draw_options.surface) for point in goal_points]
-            goal_points += [goal_points[0]]
-            pygame.draw.polygon(screen, pygame.Color("LightGreen"), goal_points)
+            if isinstance(shape, pymunk.shapes.Poly):
+                goal_points = [goal_body.local_to_world(v) for v in shape.get_vertices()]
+                goal_points = [pymunk.pygame_util.to_pygame(point, draw_options.surface) for point in goal_points]
+                goal_points += [goal_points[0]]
+                pygame.draw.polygon(screen, pygame.Color("LightGreen"), goal_points)
+            elif isinstance(shape, pymunk.shapes.Circle):
+                center = pymunk.pygame_util.to_pygame(goal_body.position, draw_options.surface)
+                pygame.draw.circle(screen, pygame.Color("LightGreen"), center, int(shape.radius), 0)
+
+
 
         # Draw agent and block
         self.space.debug_draw(draw_options)
@@ -430,7 +447,9 @@ class PushTEnv(gym.Env):
 
     def _setup(self):
         self.space = pymunk.Space()
-        self.space.gravity = 0, 0
+        self.space.gravity = 0, 600
+        # self.space.gravity = (0, 600)
+
         self.space.damping = self.damping if self.damping is not None else 0.0
         self.teleop = False
 
@@ -444,8 +463,8 @@ class PushTEnv(gym.Env):
         self.space.add(*walls)
 
         # Add agent, block, and goal zone
-        self.agent = self.add_circle(self.space, (256, 400), 15)
-        self.block, self._block_shapes = self.add_tee(self.space, (256, 300), 0)
+        self.agent = self.add_rectangle(self.space, (256, 400), (60, 20))
+        self.block, self._block_shapes = self.add_ball(self.space, (256, 300), 18)
         self.goal_pose = np.array([256, 256, np.pi / 4])  # x, y, theta (in radians)
         if self.block_cog is not None:
             self.block.center_of_gravity = self.block_cog
@@ -472,6 +491,31 @@ class PushTEnv(gym.Env):
         shape = pymunk.Segment(space.static_body, a, b, radius)
         shape.color = pygame.Color("LightGray")  # https://htmlcolorcodes.com/color-names
         return shape
+
+    @staticmethod
+    def add_ball(space, position, radius, color="LightSlateGray"):
+        mass = 0.01
+        inertia = pymunk.moment_for_circle(mass, 0, radius)
+        body = pymunk.Body(mass, inertia)
+        body.position = position
+        body.friction = 0.1
+        shape = pymunk.Circle(body, radius)
+        shape.color = pygame.Color(color)
+        shape.elasticity = 500.0  # Add this line for bounciness
+        space.add(body, shape)
+        return body, [shape]
+
+
+    @staticmethod
+    def add_rectangle(space, position, size, color="RoyalBlue"):
+        body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
+        body.position = position
+        body.friction = 0.1
+        shape = pymunk.Poly.create_box(body, size)
+        shape.color = pygame.Color(color)
+        shape.elasticity = 0.7  # Add this line for bounciness
+        space.add(body, shape)
+        return body
 
     @staticmethod
     def add_circle(space, position, radius):
@@ -539,3 +583,37 @@ class PushTEnv(gym.Env):
                 v = v + shape.body.position
                 keypoints.append(np.array(v))
         return np.row_stack(keypoints)
+    def _get_custom_reward(self):
+        # Extract positions
+        # obs = [agent_x, agent_y, ball_x, ball_y, ball_angle]
+        # obs = self._get_obs() if hasattr(self, '_get_obs') else self.observation  # adjust as needed
+        obs = self.get_obs()
+
+        ball_x = obs[2]
+        ball_y = obs[3]
+        reward = 0
+
+        # 1. Ball above center line
+        if ball_y < 256:
+            reward += 1
+
+        # 2. Penalty for touching edges
+        if ball_x <= 0 or ball_x >= 512 or ball_y <= 0:
+            reward -= 1
+
+        # 3. Large penalty for hitting bottom
+        if ball_y >= 512:
+            reward -= 10
+
+        # 4. Bonus for rectangle touching ball (collision detection)
+        contact = False
+        for arbiter in self.space.shape_query(self._block_shapes[0]):
+            if arbiter.shape in self.agent.shapes:
+  # shape of paddle
+                contact = True
+                break
+        if contact:
+            reward += 0.5
+
+        return reward
+

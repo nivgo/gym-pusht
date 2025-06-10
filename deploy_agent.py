@@ -4,7 +4,7 @@ import torch
 import numpy as np
 
 # Load policy and stats
-checkpoint = torch.load('imitation_policy.pt')
+checkpoint = torch.load("imitation_policy.pt", weights_only=False)
 obs_mean = checkpoint['obs_mean']
 obs_std = checkpoint['obs_std']
 act_mean = checkpoint['act_mean']
@@ -14,10 +14,11 @@ class PolicyNet(torch.nn.Module):
     def __init__(self, obs_dim, act_dim):
         super().__init__()
         self.model = torch.nn.Sequential(
-            torch.nn.Linear(obs_dim, 64), torch.nn.ReLU(),
-            torch.nn.Linear(64, 64), torch.nn.ReLU(),
-            torch.nn.Linear(64, act_dim)
+            torch.nn.Linear(obs_dim, 128), torch.nn.ReLU(),
+            torch.nn.Linear(128, 128), torch.nn.ReLU(),
+            torch.nn.Linear(128, act_dim)
         )
+
     def forward(self, x):
         return self.model(x)
 

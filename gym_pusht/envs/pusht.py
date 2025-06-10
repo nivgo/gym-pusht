@@ -269,10 +269,10 @@ class PushTEnv(gym.Env):
 
         observation = self.get_obs()
         info = self._get_info()
-        is_success = coverage > self.success_threshold
-        info["is_success"] = is_success
-        info["coverage"] = coverage
-
+        #is_success = #coverage > self.success_threshold
+        info["is_success"] = obs[3] < 256 #is_success
+        info["centralization_level"] = 1 - (self.agent.position[0] - obs[2]) / max(self.agent.position[0], 512 - self.agent.position[0])
+        # self.agent = self.add_rectangle(self.space, (256, 400), (60, 20))
         truncated = False
         return observation, reward, terminated, truncated, info
 
